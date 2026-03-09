@@ -149,7 +149,7 @@ async def greate_name_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     logger.info(f"Пользователь {user.id} установил никнейм: {nickname}")
 
 async def show_nicknames_list(message):
-    """Вспомогательная функция для показа списка никнеймов"""
+    """Показывает список всех никнеймов с кликабельными именами пользователей"""
     all_nicknames = db.get_all_nicknames()
     
     if not all_nicknames:
@@ -164,19 +164,30 @@ async def show_nicknames_list(message):
     response = "📋 **Список всех никнеймов:**\n\n"
     
     for i, (uid, username, first_name, last_name, nick, created_at) in enumerate(all_nicknames, 1):
-        # Формируем информацию о пользователе
-        if username:
-            user_info = f"@{username}"
-        else:
-            full_name = f"{first_name} {last_name}".strip()
-            user_info = full_name if full_name else f"ID: {uid}"
         
-        # Добавляем в список
-        response += f"{i}. **{user_info}** → *{nick}*\n"
+        # Получаем имя пользователя из профиля Telegram
+        if first_name and last_name:
+            profile_name = f"{first_name} {last_name}"
+        elif first_name:
+            profile_name = first_name
+        elif last_name:
+            profile_name = last_name
+        else:
+            profile_name = "Пользователь"
+        
+        # Если есть username - добавляем его в скобках для ясности
+        username_display = f" (@{username})" if username else ""
+        
+        # Создаем кликабельную ссылку на профиль с именем пользователя
+        # Telegram сам подставит имя, но мы явно укажем его для красоты
+        user_link = f"<a href='tg://user?id={uid}'>{profile_name}</a>"
+        
+        # Добавляем в список: Имя (кликабельно) - никнейм из бота
+        response += f"{i}. {user_link}{username_display} — *{nick}*\n"
     
     response += f"\n👥 **Всего пользователей:** {len(all_nicknames)}"
     
-    await message.reply_text(response, parse_mode='Markdown')
+    await message.reply_text(response, parse_mode='HTML')
     logger.info(f"Показан список никнеймов ({len(all_nicknames)} записей)")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -194,7 +205,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text and text.startswith('/'):
         return
     
-    # 🔥 НОВОЕ: Проверяем формат "Привет. Я <никнейм>"
+    # Проверяем формат "Привет. Я <никнейм>"
     if text and text.startswith("Привет. Я "):
         nickname = text.replace("Привет. Я ", "").strip()
         
