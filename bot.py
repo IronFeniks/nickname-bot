@@ -3,16 +3,16 @@ import sqlite3
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# Настройка логирования - ИСПРАВЛЕНО: asctime, а не asime
+# Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация
+# Конфигурация - ИСПРАВЛЕНО: TOPIC_ID = 4
 BOT_TOKEN = "8606821173:AAHDM_tM89RbEvFD5skzfnPDXQhVm1TVDPM"
-TOPIC_ID = 5108  # ID топика
+TOPIC_ID = 4  # ID топика из ссылки (исправлено с 5108 на 4)
 CHAT_ID = -1003300908374  # ID чата
 
 class NicknameDatabase:
@@ -82,8 +82,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != CHAT_ID:
         return
     
-    # Проверяем, что сообщение из нужного топика
+    # Проверяем, что сообщение из нужного топика (теперь TOPIC_ID = 4)
     if update.effective_message.message_thread_id != TOPIC_ID:
+        logger.debug(f"Сообщение не из топика {TOPIC_ID}, а из {update.effective_message.message_thread_id}")
         return
     
     message = update.message
@@ -96,7 +97,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     text = message.text
     
-    logger.info(f"Сообщение в топике от {user.id}: {text}")
+    logger.info(f"Сообщение в топике {TOPIC_ID} от {user.id}: {text}")
     
     # Обработка команды регистрации
     if text and text.startswith("Привет. Я "):
@@ -176,7 +177,7 @@ async def handle_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if deleted_nickname:
             logger.info(f"Пользователь {deleted_nickname} покинул группу")
-            # Отправляем уведомление в топик
+            # Отправляем уведомление в топик (с правильным TOPIC_ID)
             await message.chat.send_message(
                 f"👋 **{deleted_nickname}** покинул группу и удален из списка",
                 message_thread_id=TOPIC_ID,
@@ -215,11 +216,11 @@ def main():
     # Добавляем обработчик ошибок
     application.add_error_handler(error_handler)
     
-    # Информация о запуске
+    # Информация о запуске - теперь с правильным TOPIC_ID
     logger.info("=" * 50)
     logger.info("Бот успешно запущен!")
     logger.info(f"Чат ID: {CHAT_ID}")
-    logger.info(f"Топик ID: {TOPIC_ID}")
+    logger.info(f"Топик ID: {TOPIC_ID} (из ссылки https://t.me/c/3300908374/4/5228)")
     logger.info(f"Токен бота: {BOT_TOKEN[:10]}...{BOT_TOKEN[-10:]}")
     logger.info("=" * 50)
     
