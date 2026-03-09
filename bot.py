@@ -3,9 +3,9 @@ import sqlite3
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# Настройка логирования
+# Настройка логирования - ИСПРАВЛЕНО: asctime, а не asime
 logging.basicConfig(
-    format='%(asime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -72,11 +72,14 @@ class NicknameDatabase:
                 return result[0]
             return None
 
+# Создаем экземпляр базы данных
 db = NicknameDatabase()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, что сообщение из нужного чата и топика
-    if (update.effective_chat.id != CHAT_ID):
+    """Обработчик сообщений в топике"""
+    
+    # Проверяем, что сообщение из нужного чата
+    if update.effective_chat.id != CHAT_ID:
         return
     
     # Проверяем, что сообщение из нужного топика
@@ -95,10 +98,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"Сообщение в топике от {user.id}: {text}")
     
+    # Обработка команды регистрации
     if text and text.startswith("Привет. Я "):
         nickname = text.replace("Привет. Я ", "").strip()
         
         if nickname:
+            # Сохраняем никнейм
             db.save_nickname(
                 user_id=user.id,
                 username=user.username,
@@ -107,95 +112,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 nickname=nickname
             )
             
+            # Получаем всех пользователей и показываем список
             all_nicknames = db.get_all_nicknames()
-            response = "📋 **Список никнеймов:**\n\n"
-            for uid, username, first_name, last_name, nick, _ in all_nicknames:
+            response = "📋 **Список всех никнеймов:**\n\n"
+            
+            for uid, username, first_name, last_name, nick, created_at in all_nicknames:
+                # Формируем информацию о пользователе
                 if username:
                     user_info = f"@{username}"
                 else:
                     full_name = f"{first_name} {last_name}".strip()
                     user_info = full_name if full_name else f"ID: {uid}"
+                
+                # Добавляем в список
                 response += f"• **{user_info}**: {nick}\n"
             
-            response += f"\nВсего: {len(all_nicknames)} пользователей"
+            response += f"\n👥 **Всего пользователей:** {len(all_nicknames)}"
+            
             await message.reply_text(response, parse_mode='Markdown')
+            logger.info(f"Зарегистрирован новый пользователь: {nickname}")
     
-    else:
+    # Обработка обычных сообщений (не команд и не регистрация)
+    elif text and not text.startswith("/") and not text.startswith("Привет. Я "):
         saved_nickname = db.get_nickname(user.id)
         
         if saved_nickname:
             try:
+                # Пытаемся удалить оригинальное сообщение
                 await message.delete()
                 
-                if text:
-                    new_text = f"<b>{saved_nickname}</b>:\n{text}"
-                elif message.caption:
-                    new_text = f"<b>{saved_nickname}</b>:\n{message.caption}"
-                else:
-                    new_text = f"<b>{saved_nickname}</b>:"
-                
-                if message.photo:
-                    await message.chat.send_photo(
-                        photo=message.photo[-1].file_id,
-                        caption=new_text,
-                        message_thread_id=TOPIC_ID,
-                        parse_mode='HTML'
-                    )
-                elif message.video:
-                    await message.chat.send_video(
-                        video=message.video.file_id,
-                        caption=new_text,
-                        message_thread_id=TOPIC_ID,
-                        parse_mode='HTML'
-                    )
-                elif message.document:
-                    await message.chat.send_document(
-                        document=message.document.file_id,
-                        caption=new_text,
-                        message_thread_id=TOPIC_ID,
-                        parse_mode='HTML'
-                    )
-                elif message.animation:
-                    await message.chat.send_animation(
-                        animation=message.animation.file_id,
-                        caption=new_text,
-                        message_thread_id=TOPIC_ID,
-                        parse_mode='HTML'
-                    )
-                elif message.sticker:
-                    await message.chat.send_sticker(
-                        sticker=message.sticker.file_id,
-                        message_thread_id=TOPIC_ID
-                    )
-                elif message.voice:
-                    await message.chat.send_voice(
-                        voice=message.voice.file_id,
-                        caption=new_text if message.caption else None,
-                        message_thread_id=TOPIC_ID,
-                        parse_mode='HTML' if message.caption else None
-                    )
-                elif message.text or not message:
-                    await message.chat.send_message(
-                        text=new_text,
-                        message_thread_id=TOPIC_ID,
-                        parse_mode='HTML'
-                    )
-                    
-                logger.info(f"Заменено имя на {saved_nickname}")
+                # Отправляем новое с никнеймом
+                new_text = f"<b>{saved_nickname}</b>:\n{text}"
+                await message.chat.send_message(
+                    text=new_text,
+                    message_thread_id=TOPIC_ID,
+                    parse_mode='HTML'
+                )
+                logger.info(f"Заменено сообщение от {user.id} на никнейм {saved_nickname}")
                 
             except Exception as e:
                 logger.error(f"Ошибка при замене сообщения: {e}")
+                # Если не удалось удалить, просто отвечаем
                 await message.reply_text(
                     f"⚠️ {saved_nickname}, у бота нет прав удалять сообщения. "
-                    "Пожалуйста, используйте формат 'Привет. Я никнейм' для регистрации."
+                    "Пожалуйста, дайте мне права администратора с возможностью удалять сообщения."
                 )
         else:
-            if text and not text.startswith("Привет. Я "):
-                await message.reply_text(
-                    "👋 Напиши 'Привет. Я твой_никнейм' чтобы я запомнил тебя"
-                )
+            # Если пользователь не зарегистрирован
+            await message.reply_text(
+                "👋 Привет! Чтобы я мог запомнить твой никнейм, напиши 'Привет. Я твой_никнейм'"
+            )
 
 async def handle_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик выхода пользователя из группы"""
     message = update.message
     
     if not message or message.chat.id != CHAT_ID:
@@ -215,34 +184,30 @@ async def handle_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
     logger.error(f"Ошибка: {context.error}")
 
 def main():
+    """Главная функция"""
+    
     # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Создаем фильтры правильно
-    # Фильтр для сообщений в нужном чате И в нужном топике
+    # Фильтр для нужного чата
     chat_filter = filters.Chat(chat_id=CHAT_ID)
     
-    # Для сообщений в топике используем фильтр по message_thread_id
-    # НО! Мы не можем создать фильтр Message, нам нужно создать кастомный фильтр
-    # Или проверять внутри обработчика (что мы уже делаем)
-    
-    # Добавляем обработчик для всех сообщений в нужном чате
-    application.add_handler(
-        MessageHandler(chat_filter & filters.TEXT & ~filters.COMMAND, handle_message)
-    )
-    
-    # Добавляем обработчик для медиа-сообщений (не текстовых)
-    application.add_handler(
-        MessageHandler(chat_filter & ~filters.TEXT & ~filters.COMMAND, handle_message)
-    )
-    
-    # Добавляем обработчик для событий выхода из группы
+    # Обработчик для всех текстовых сообщений
     application.add_handler(
         MessageHandler(
-            filters.Chat(chat_id=CHAT_ID) & filters.StatusUpdate.LEFT_CHAT_MEMBER,
+            chat_filter & filters.TEXT & ~filters.COMMAND, 
+            handle_message
+        )
+    )
+    
+    # Обработчик для событий выхода из группы
+    application.add_handler(
+        MessageHandler(
+            chat_filter & filters.StatusUpdate.LEFT_CHAT_MEMBER,
             handle_left_member
         )
     )
@@ -250,11 +215,16 @@ def main():
     # Добавляем обработчик ошибок
     application.add_error_handler(error_handler)
     
-    logger.info("Бот запущен...")
-    logger.info(f"Чат ID: {CHAT_ID}, Топик ID: {TOPIC_ID}")
+    # Информация о запуске
+    logger.info("=" * 50)
+    logger.info("Бот успешно запущен!")
+    logger.info(f"Чат ID: {CHAT_ID}")
+    logger.info(f"Топик ID: {TOPIC_ID}")
+    logger.info(f"Токен бота: {BOT_TOKEN[:10]}...{BOT_TOKEN[-10:]}")
+    logger.info("=" * 50)
+    
+    # Запускаем бота
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
-    main()
 if __name__ == "__main__":
     main()
