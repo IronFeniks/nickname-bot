@@ -1,7 +1,7 @@
 import logging
 import sqlite3
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 # Настройка логирования
 logging.basicConfig(
@@ -10,9 +10,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация - ИСПРАВЛЕНО: TOPIC_ID = 4
+# Конфигурация
 BOT_TOKEN = "8606821173:AAHDM_tM89RbEvFD5skzfnPDXQhVm1TVDPM"
-TOPIC_ID = 4  # ID топика из ссылки (исправлено с 5108 на 4)
+TOPIC_ID = 4  # ID топика из ссылки
 CHAT_ID = -1003300908374  # ID чата
 
 class NicknameDatabase:
@@ -41,6 +41,7 @@ class NicknameDatabase:
                 VALUES (?, ?, ?, ?, ?)
             """, (user_id, username, first_name, last_name, nickname))
             logger.info(f"Сохранен никнейм для user_id {user_id}: {nickname}")
+            return True
     
     def get_nickname(self, user_id):
         with sqlite3.connect(self.db_path) as conn:
@@ -75,35 +76,137 @@ class NicknameDatabase:
 # Создаем экземпляр базы данных
 db = NicknameDatabase()
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик сообщений в топике"""
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    await update.message.reply_text(
+        "👋 Привет! Я бот для хранения никнеймов.\n\n"
+        "📋 **Доступные команды:**\n"
+        "• `/list_name` - показать список всех никнеймов\n"
+        "• `/greate_name ВашНик` - задать свой никнейм\n"
+        "• `/help` - показать это сообщение\n\n"
+        "✨ Также ты можешь написать **\"Привет. Я твой_никнейм\"** "
+        "и я автоматически сохраню его и покажу весь список!",
+        parse_mode='Markdown'
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /help"""
+    await start_command(update, context)
+
+async def list_name_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /list_name - показывает список всех никнеймов"""
     
-    # Проверяем, что сообщение из нужного чата
-    if update.effective_chat.id != CHAT_ID:
+    # Проверяем, что команда из нужного чата и топика
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
-    # Проверяем, что сообщение из нужного топика (теперь TOPIC_ID = 4)
-    if update.effective_message.message_thread_id != TOPIC_ID:
-        logger.debug(f"Сообщение не из топика {TOPIC_ID}, а из {update.effective_message.message_thread_id}")
+    await show_nicknames_list(update.message)
+
+async def greate_name_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /greate_name - задает никнейм пользователю"""
+    
+    # Проверяем, что команда из нужного чата и топика
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
+        return
+    
+    user = update.effective_user
+    
+    # Проверяем, указан ли никнейм в команде
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Пожалуйста, укажите никнейм после команды.\n"
+            "Пример: `/greate_name СуперКодер`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Объединяем аргументы в один никнейм
+    nickname = ' '.join(context.args).strip()
+    
+    # Проверяем длину никнейма
+    if len(nickname) > 50:
+        await update.message.reply_text("❌ Никнейм слишком длинный (максимум 50 символов)")
+        return
+    
+    if len(nickname) < 2:
+        await update.message.reply_text("❌ Никнейм слишком короткий (минимум 2 символа)")
+        return
+    
+    # Сохраняем никнейм
+    db.save_nickname(
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name or "",
+        nickname=nickname
+    )
+    
+    await update.message.reply_text(
+        f"✅ Никнейм успешно сохранен!\n"
+        f"Теперь ты **{nickname}**",
+        parse_mode='Markdown'
+    )
+    logger.info(f"Пользователь {user.id} установил никнейм: {nickname}")
+
+async def show_nicknames_list(message):
+    """Вспомогательная функция для показа списка никнеймов"""
+    all_nicknames = db.get_all_nicknames()
+    
+    if not all_nicknames:
+        await message.reply_text(
+            "📭 Список никнеймов пуст. Будь первым!\n"
+            "Используй `/greate_name ВашНик` или напиши **\"Привет. Я твой_никнейм\"**",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Формируем сообщение со списком
+    response = "📋 **Список всех никнеймов:**\n\n"
+    
+    for i, (uid, username, first_name, last_name, nick, created_at) in enumerate(all_nicknames, 1):
+        # Формируем информацию о пользователе
+        if username:
+            user_info = f"@{username}"
+        else:
+            full_name = f"{first_name} {last_name}".strip()
+            user_info = full_name if full_name else f"ID: {uid}"
+        
+        # Добавляем в список
+        response += f"{i}. **{user_info}** → *{nick}*\n"
+    
+    response += f"\n👥 **Всего пользователей:** {len(all_nicknames)}"
+    
+    await message.reply_text(response, parse_mode='Markdown')
+    logger.info(f"Показан список никнеймов ({len(all_nicknames)} записей)")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик обычных сообщений (не команд)"""
+    
+    # Проверяем, что сообщение из нужного чата и топика
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
     message = update.message
-    if not message:
-        return
-        
     user = update.effective_user
-    if not user:
-        return
-        
     text = message.text
     
-    logger.info(f"Сообщение в топике {TOPIC_ID} от {user.id}: {text}")
+    # Игнорируем команды (они обрабатываются отдельно)
+    if text and text.startswith('/'):
+        return
     
-    # Обработка команды регистрации
+    # 🔥 НОВОЕ: Проверяем формат "Привет. Я <никнейм>"
     if text and text.startswith("Привет. Я "):
         nickname = text.replace("Привет. Я ", "").strip()
         
         if nickname:
+            # Проверяем длину никнейма
+            if len(nickname) > 50:
+                await message.reply_text("❌ Никнейм слишком длинный (максимум 50 символов)")
+                return
+            if len(nickname) < 2:
+                await message.reply_text("❌ Никнейм слишком короткий (минимум 2 символа)")
+                return
+            
             # Сохраняем никнейм
             db.save_nickname(
                 user_id=user.id,
@@ -113,56 +216,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 nickname=nickname
             )
             
-            # Получаем всех пользователей и показываем список
-            all_nicknames = db.get_all_nicknames()
-            response = "📋 **Список всех никнеймов:**\n\n"
-            
-            for uid, username, first_name, last_name, nick, created_at in all_nicknames:
-                # Формируем информацию о пользователе
-                if username:
-                    user_info = f"@{username}"
-                else:
-                    full_name = f"{first_name} {last_name}".strip()
-                    user_info = full_name if full_name else f"ID: {uid}"
-                
-                # Добавляем в список
-                response += f"• **{user_info}**: {nick}\n"
-            
-            response += f"\n👥 **Всего пользователей:** {len(all_nicknames)}"
-            
-            await message.reply_text(response, parse_mode='Markdown')
-            logger.info(f"Зарегистрирован новый пользователь: {nickname}")
-    
-    # Обработка обычных сообщений (не команд и не регистрация)
-    elif text and not text.startswith("/") and not text.startswith("Привет. Я "):
-        saved_nickname = db.get_nickname(user.id)
-        
-        if saved_nickname:
-            try:
-                # Пытаемся удалить оригинальное сообщение
-                await message.delete()
-                
-                # Отправляем новое с никнеймом
-                new_text = f"<b>{saved_nickname}</b>:\n{text}"
-                await message.chat.send_message(
-                    text=new_text,
-                    message_thread_id=TOPIC_ID,
-                    parse_mode='HTML'
-                )
-                logger.info(f"Заменено сообщение от {user.id} на никнейм {saved_nickname}")
-                
-            except Exception as e:
-                logger.error(f"Ошибка при замене сообщения: {e}")
-                # Если не удалось удалить, просто отвечаем
-                await message.reply_text(
-                    f"⚠️ {saved_nickname}, у бота нет прав удалять сообщения. "
-                    "Пожалуйста, дайте мне права администратора с возможностью удалять сообщения."
-                )
-        else:
-            # Если пользователь не зарегистрирован
+            # Подтверждаем сохранение
             await message.reply_text(
-                "👋 Привет! Чтобы я мог запомнить твой никнейм, напиши 'Привет. Я твой_никнейм'"
+                f"✅ Привет, **{nickname}**! Твой никнейм сохранен.",
+                parse_mode='Markdown'
             )
+            
+            # Показываем весь список никнеймов
+            await show_nicknames_list(message)
+            
+            logger.info(f"Пользователь {user.id} зарегистрировался через фразу: {nickname}")
+            return
+    
+    # Для остальных обычных сообщений
+    logger.info(f"Обычное сообщение от {user.id} в топике: {text}")
+    
+    # Напоминание для незарегистрированных
+    if not db.get_nickname(user.id):
+        await message.reply_text(
+            "👋 Кстати, ты еще не задал себе никнейм!\n"
+            "Напиши **\"Привет. Я твой_никнейм\"** или используй команду `/greate_name ТвойНик`",
+            parse_mode='Markdown'
+        )
 
 async def handle_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик выхода пользователя из группы"""
@@ -177,7 +252,7 @@ async def handle_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if deleted_nickname:
             logger.info(f"Пользователь {deleted_nickname} покинул группу")
-            # Отправляем уведомление в топик (с правильным TOPIC_ID)
+            # Отправляем уведомление в топик
             await message.chat.send_message(
                 f"👋 **{deleted_nickname}** покинул группу и удален из списка",
                 message_thread_id=TOPIC_ID,
@@ -197,7 +272,13 @@ def main():
     # Фильтр для нужного чата
     chat_filter = filters.Chat(chat_id=CHAT_ID)
     
-    # Обработчик для всех текстовых сообщений
+    # Добавляем обработчики команд
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("list_name", list_name_command))
+    application.add_handler(CommandHandler("greate_name", greate_name_command))
+    
+    # Обработчик для обычных сообщений (включая фразу "Привет. Я ...")
     application.add_handler(
         MessageHandler(
             chat_filter & filters.TEXT & ~filters.COMMAND, 
@@ -216,12 +297,13 @@ def main():
     # Добавляем обработчик ошибок
     application.add_error_handler(error_handler)
     
-    # Информация о запуске - теперь с правильным TOPIC_ID
+    # Информация о запуске
     logger.info("=" * 50)
     logger.info("Бот успешно запущен!")
     logger.info(f"Чат ID: {CHAT_ID}")
-    logger.info(f"Топик ID: {TOPIC_ID} (из ссылки https://t.me/c/3300908374/4/5228)")
-    logger.info(f"Токен бота: {BOT_TOKEN[:10]}...{BOT_TOKEN[-10:]}")
+    logger.info(f"Топик ID: {TOPIC_ID}")
+    logger.info("Доступные команды: /start, /help, /list_name, /greate_name")
+    logger.info("Также поддерживается фраза: 'Привет. Я никнейм'")
     logger.info("=" * 50)
     
     # Запускаем бота
