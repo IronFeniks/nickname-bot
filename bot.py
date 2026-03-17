@@ -23,12 +23,33 @@ ADMIN_IDS = [639212691]  # ID админа
 if os.path.exists('/data'):
     DB_PATH = '/data/nicknames.db'
     logger.info(f"✅ Используется постоянное хранилище: {DB_PATH}")
+    # Создаем директорию /data если её нет (хотя она должна существовать)
+    os.makedirs('/data', exist_ok=True)
 else:
     DB_PATH = 'nicknames.db'
     logger.info(f"⚠️ Используется локальное хранилище: {DB_PATH}")
+    # Для локального файла директория не требуется
 
-# Создаем директорию для БД если её нет
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+# Проверяем, можем ли писать в выбранное место
+try:
+    # Получаем директорию для записи
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:  # Если директория указана (не пустая)
+        os.makedirs(db_dir, exist_ok=True)
+        test_file = os.path.join(db_dir, 'test_write.tmp')
+    else:  # Если файл в текущей директории
+        test_file = 'test_write.tmp'
+    
+    # Пробуем создать тестовый файл
+    with open(test_file, 'w') as f:
+        f.write('test')
+    os.remove(test_file)
+    logger.info(f"✅ Есть доступ на запись в {db_dir or 'текущую директорию'}")
+except Exception as e:
+    logger.error(f"❌ Нет доступа на запись: {e}")
+    # В крайнем случае используем текущую директорию
+    DB_PATH = 'nicknames.db'
+    logger.info(f"⚠️ Переключено на локальное хранилище: {DB_PATH}")
 
 # ==================== КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ====================
 class NicknameDatabase:
@@ -38,36 +59,40 @@ class NicknameDatabase:
     
     def init_database(self):
         """Инициализация базы данных"""
-        with sqlite3.connect(self.db_path) as conn:
-            # Таблица пользователей
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    last_name TEXT,
-                    nickname TEXT,
-                    is_active BOOLEAN DEFAULT 1,
-                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Таблица для логов действий админа
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS admin_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    admin_id INTEGER,
-                    action TEXT,
-                    target_user_id INTEGER,
-                    old_nickname TEXT,
-                    new_nickname TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            logger.info(f"✅ База данных инициализирована в {self.db_path}")
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # Таблица пользователей
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id INTEGER PRIMARY KEY,
+                        username TEXT,
+                        first_name TEXT,
+                        last_name TEXT,
+                        nickname TEXT,
+                        is_active BOOLEAN DEFAULT 1,
+                        last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Таблица для логов действий админа
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS admin_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        admin_id INTEGER,
+                        action TEXT,
+                        target_user_id INTEGER,
+                        old_nickname TEXT,
+                        new_nickname TEXT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                logger.info(f"✅ База данных инициализирована в {self.db_path}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при инициализации БД: {e}")
+            raise
     
     def update_user(self, user_id, username, first_name, last_name):
         """Обновляет или добавляет пользователя при активности"""
