@@ -216,9 +216,6 @@ class NicknameDatabase:
             cursor = conn.execute("SELECT COUNT(*) FROM users WHERE nickname IS NOT NULL AND is_active = 1")
             with_nicknames = cursor.fetchone()[0]
             
-            cursor = conn.execute("SELECT COUNT(*) FROM users WHERE nickname IS NULL AND is_active = 1")
-            without_nicknames = cursor.fetchone()[0]
-            
             cursor = conn.execute("SELECT COUNT(*) FROM users WHERE is_active = 0")
             inactive = cursor.fetchone()[0]
             
@@ -226,7 +223,6 @@ class NicknameDatabase:
                 'total': total,
                 'active': active,
                 'with_nicknames': with_nicknames,
-                'without_nicknames': without_nicknames,
                 'inactive': inactive
             }
 
@@ -301,6 +297,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /list"""
+    # Проверка уже есть в фильтре, но оставим для надежности
     if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
@@ -390,6 +387,8 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Справка по админ-командам"""
     if not is_admin(update.effective_user.id):
         return
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
+        return
     
     await update.message.reply_text(
         "🔐 <b>Админ-команды:</b>\n\n"
@@ -405,6 +404,8 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать статистику"""
     if not is_admin(update.effective_user.id):
+        return
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
     stats = db.get_stats()
@@ -422,6 +423,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_nick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Установить никнейм пользователю по @username"""
     if not is_admin(update.effective_user.id):
+        return
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
     if len(context.args) < 2:
@@ -448,6 +451,8 @@ async def set_nick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_nick_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Установить никнейм пользователю по ID"""
     if not is_admin(update.effective_user.id):
+        return
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
     if len(context.args) < 2:
@@ -479,6 +484,8 @@ async def remove_nick_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Удалить никнейм пользователя по @username"""
     if not is_admin(update.effective_user.id):
         return
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
+        return
     
     if not context.args:
         await update.message.reply_text("❌ Использование: /remove_nick @username")
@@ -501,6 +508,8 @@ async def remove_nick_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def remove_nick_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удалить никнейм пользователя по ID"""
     if not is_admin(update.effective_user.id):
+        return
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
     if not context.args:
@@ -555,8 +564,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Показываем список
             await show_users_list(message)
             return
-    
-    # ⚠️ НАПОМИНАНИЕ УДАЛЕНО — бот больше не отвечает незарегистрированным
 
 async def handle_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик выхода пользователя из группы"""
@@ -583,39 +590,40 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error(f"❌ Ошибка: {context.error}")
 
-# ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
+# ==================== ГЛАВНАЯ ФУНКЦИЯ (ИСПРАВЛЕННАЯ) ====================
 def main():
-    """Запуск бота"""
+    """Запуск бота с правильной фильтрацией по топику"""
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    chat_filter = filters.Chat(chat_id=CHAT_ID)
+    # 🔥 ВАЖНО: Создаем фильтр для конкретного чата И топика
+    chat_and_topic_filter = filters.Chat(chat_id=CHAT_ID) & filters.Message(message_thread_id=TOPIC_ID)
     
-    # Команды для всех
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("list", list_command))
-    application.add_handler(CommandHandler("greate_name", greate_name_command))
-    application.add_handler(CommandHandler("edit_name", edit_name_command))
-    application.add_handler(CommandHandler("remove_name", remove_name_command))
+    # Команды для всех - теперь с проверкой топика через фильтр
+    application.add_handler(CommandHandler("start", start_command, filters=chat_and_topic_filter))
+    application.add_handler(CommandHandler("help", help_command, filters=chat_and_topic_filter))
+    application.add_handler(CommandHandler("list", list_command, filters=chat_and_topic_filter))
+    application.add_handler(CommandHandler("greate_name", greate_name_command, filters=chat_and_topic_filter))
+    application.add_handler(CommandHandler("edit_name", edit_name_command, filters=chat_and_topic_filter))
+    application.add_handler(CommandHandler("remove_name", remove_name_command, filters=chat_and_topic_filter))
     
-    # Админ-команды
-    application.add_handler(CommandHandler("admin_help", admin_help_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("set_nick", set_nick_command))
-    application.add_handler(CommandHandler("set_nick_id", set_nick_id_command))
-    application.add_handler(CommandHandler("remove_nick", remove_nick_command))
-    application.add_handler(CommandHandler("remove_nick_id", remove_nick_id_command))
+    # Админ-команды - тоже с проверкой топика
+    application.add_handler(CommandHandler("admin_help", admin_help_command, filters=chat_and_topic_filter))
+    application.add_handler(CommandHandler("stats", stats_command, filters=chat_and_topic_filter))
+    application.add_handler(CommandHandler("set_nick", set_nick_command, filters=chat_and_topic_filter))
+    application.add_handler(CommandHandler("set_nick_id", set_nick_id_command, filters=chat_and_topic_filter))
+    application.add_handler(CommandHandler("remove_nick", remove_nick_command, filters=chat_and_topic_filter))
+    application.add_handler(CommandHandler("remove_nick_id", remove_nick_id_command, filters=chat_and_topic_filter))
     
-    # Обработчики сообщений
+    # Обработчик обычных сообщений - с фильтром
     application.add_handler(
-        MessageHandler(chat_filter & filters.TEXT & ~filters.COMMAND, handle_message)
+        MessageHandler(chat_and_topic_filter & filters.TEXT & ~filters.COMMAND, handle_message)
     )
     
-    # Обработчик выхода
+    # Обработчик выхода из группы (это сообщения в общем чате, не в топике)
     application.add_handler(
         MessageHandler(
-            chat_filter & filters.StatusUpdate.LEFT_CHAT_MEMBER,
+            filters.Chat(chat_id=CHAT_ID) & filters.StatusUpdate.LEFT_CHAT_MEMBER,
             handle_left_member
         )
     )
@@ -628,6 +636,7 @@ def main():
     logger.info(f"👤 Админ ID: {ADMIN_IDS}")
     logger.info(f"💬 Чат ID: {CHAT_ID}")
     logger.info(f"📌 Топик ID: {TOPIC_ID}")
+    logger.info("✅ Бот будет отвечать ТОЛЬКО в указанном топике")
     logger.info("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
