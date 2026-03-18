@@ -279,6 +279,8 @@ async def show_users_list(message):
 # ==================== КОМАНДЫ ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ ====================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
+        return
     await update.message.reply_text(
         "👋 <b>Привет! Я бот для хранения никнеймов.</b>\n\n"
         "📋 <b>Команды:</b>\n"
@@ -297,7 +299,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /list"""
-    # Проверка уже есть в фильтре, но оставим для надежности
     if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
@@ -415,6 +416,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 <b>Всего в базе:</b> {stats['total']}\n"
         f"✅ <b>Активных:</b> {stats['active']}\n"
         f"📝 <b>С никнеймами:</b> {stats['with_nicknames']}\n"
+        f"👋 <b>Покинули:</b> {stats['inactive']}\n"
         f"📁 <b>Файл БД:</b> {DB_PATH}"
     )
     
@@ -596,31 +598,32 @@ def main():
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # 🔥 ВАЖНО: Создаем фильтр для конкретного чата И топика
-    chat_and_topic_filter = filters.Chat(chat_id=CHAT_ID) & filters.Message(message_thread_id=TOPIC_ID)
+    # 🔥 ИСПРАВЛЕНО: Простой фильтр по чату
+    chat_filter = filters.Chat(chat_id=CHAT_ID)
     
-    # Команды для всех - теперь с проверкой топика через фильтр
-    application.add_handler(CommandHandler("start", start_command, filters=chat_and_topic_filter))
-    application.add_handler(CommandHandler("help", help_command, filters=chat_and_topic_filter))
-    application.add_handler(CommandHandler("list", list_command, filters=chat_and_topic_filter))
-    application.add_handler(CommandHandler("greate_name", greate_name_command, filters=chat_and_topic_filter))
-    application.add_handler(CommandHandler("edit_name", edit_name_command, filters=chat_and_topic_filter))
-    application.add_handler(CommandHandler("remove_name", remove_name_command, filters=chat_and_topic_filter))
+    # Команды для всех - фильтруем только по чату
+    # Проверка топика выполняется внутри каждой функции
+    application.add_handler(CommandHandler("start", start_command, filters=chat_filter))
+    application.add_handler(CommandHandler("help", help_command, filters=chat_filter))
+    application.add_handler(CommandHandler("list", list_command, filters=chat_filter))
+    application.add_handler(CommandHandler("greate_name", greate_name_command, filters=chat_filter))
+    application.add_handler(CommandHandler("edit_name", edit_name_command, filters=chat_filter))
+    application.add_handler(CommandHandler("remove_name", remove_name_command, filters=chat_filter))
     
-    # Админ-команды - тоже с проверкой топика
-    application.add_handler(CommandHandler("admin_help", admin_help_command, filters=chat_and_topic_filter))
-    application.add_handler(CommandHandler("stats", stats_command, filters=chat_and_topic_filter))
-    application.add_handler(CommandHandler("set_nick", set_nick_command, filters=chat_and_topic_filter))
-    application.add_handler(CommandHandler("set_nick_id", set_nick_id_command, filters=chat_and_topic_filter))
-    application.add_handler(CommandHandler("remove_nick", remove_nick_command, filters=chat_and_topic_filter))
-    application.add_handler(CommandHandler("remove_nick_id", remove_nick_id_command, filters=chat_and_topic_filter))
+    # Админ-команды - фильтруем только по чату
+    application.add_handler(CommandHandler("admin_help", admin_help_command, filters=chat_filter))
+    application.add_handler(CommandHandler("stats", stats_command, filters=chat_filter))
+    application.add_handler(CommandHandler("set_nick", set_nick_command, filters=chat_filter))
+    application.add_handler(CommandHandler("set_nick_id", set_nick_id_command, filters=chat_filter))
+    application.add_handler(CommandHandler("remove_nick", remove_nick_command, filters=chat_filter))
+    application.add_handler(CommandHandler("remove_nick_id", remove_nick_id_command, filters=chat_filter))
     
-    # Обработчик обычных сообщений - с фильтром
+    # Обработчик обычных сообщений - фильтруем по чату, остальное проверяем в функции
     application.add_handler(
-        MessageHandler(chat_and_topic_filter & filters.TEXT & ~filters.COMMAND, handle_message)
+        MessageHandler(chat_filter & filters.TEXT & ~filters.COMMAND, handle_message)
     )
     
-    # Обработчик выхода из группы (это сообщения в общем чате, не в топике)
+    # Обработчик выхода из группы (сообщения в общем чате, не в топике)
     application.add_handler(
         MessageHandler(
             filters.Chat(chat_id=CHAT_ID) & filters.StatusUpdate.LEFT_CHAT_MEMBER,
@@ -636,7 +639,7 @@ def main():
     logger.info(f"👤 Админ ID: {ADMIN_IDS}")
     logger.info(f"💬 Чат ID: {CHAT_ID}")
     logger.info(f"📌 Топик ID: {TOPIC_ID}")
-    logger.info("✅ Бот будет отвечать ТОЛЬКО в указанном топике")
+    logger.info("✅ Бот будет отвечать ТОЛЬКО в указанном топике (проверка внутри функций)")
     logger.info("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
