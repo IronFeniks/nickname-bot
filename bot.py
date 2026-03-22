@@ -235,7 +235,9 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 async def show_users_list(message):
-    """Показывает список всех активных пользователей"""
+    """Показывает список всех активных пользователей в формате:
+    Имя (@username) — *никнейм*
+    """
     users = db.get_active_users()
     
     if not users:
@@ -248,6 +250,10 @@ async def show_users_list(message):
     response = "📋 <b>Активные участники:</b>\n\n"
     
     for i, (user_id, username, first_name, last_name, nickname) in enumerate(users, 1):
+        # Формируем отображаемое имя
+        display_parts = []
+        
+        # Добавляем имя из профиля (first_name + last_name)
         if first_name and last_name:
             profile_name = f"{first_name} {last_name}"
         elif first_name:
@@ -255,15 +261,31 @@ async def show_users_list(message):
         elif last_name:
             profile_name = last_name
         else:
-            profile_name = f"Пользователь {user_id}"
+            profile_name = None
         
-        safe_profile_name = html.escape(profile_name)
+        # Добавляем @username если есть
+        if username:
+            username_display = f"@{html.escape(username)}"
+        else:
+            username_display = None
         
+        # Формируем основную часть (имя + username в скобках)
+        if profile_name and username_display:
+            main_part = f"{html.escape(profile_name)} ({username_display})"
+        elif profile_name:
+            main_part = html.escape(profile_name)
+        elif username_display:
+            main_part = username_display
+        else:
+            main_part = f"Пользователь {user_id}"
+        
+        # Делаем ссылку кликабельной
         if username:
             user_display = f"@{html.escape(username)}"
         else:
-            user_display = f"<a href='tg://user?id={user_id}'>{safe_profile_name}</a>"
+            user_display = f"<a href='tg://user?id={user_id}'>{main_part}</a>"
         
+        # Добавляем никнейм если есть
         if nickname:
             safe_nickname = html.escape(nickname)
             response += f"{i}. {user_display} — <i>{safe_nickname}</i>\n"
@@ -592,17 +614,16 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error(f"❌ Ошибка: {context.error}")
 
-# ==================== ГЛАВНАЯ ФУНКЦИЯ (ИСПРАВЛЕННАЯ) ====================
+# ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
 def main():
     """Запуск бота с правильной фильтрацией по топику"""
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # 🔥 ИСПРАВЛЕНО: Простой фильтр по чату
+    # Фильтр по чату
     chat_filter = filters.Chat(chat_id=CHAT_ID)
     
-    # Команды для всех - фильтруем только по чату
-    # Проверка топика выполняется внутри каждой функции
+    # Команды для всех
     application.add_handler(CommandHandler("start", start_command, filters=chat_filter))
     application.add_handler(CommandHandler("help", help_command, filters=chat_filter))
     application.add_handler(CommandHandler("list", list_command, filters=chat_filter))
@@ -610,7 +631,7 @@ def main():
     application.add_handler(CommandHandler("edit_name", edit_name_command, filters=chat_filter))
     application.add_handler(CommandHandler("remove_name", remove_name_command, filters=chat_filter))
     
-    # Админ-команды - фильтруем только по чату
+    # Админ-команды
     application.add_handler(CommandHandler("admin_help", admin_help_command, filters=chat_filter))
     application.add_handler(CommandHandler("stats", stats_command, filters=chat_filter))
     application.add_handler(CommandHandler("set_nick", set_nick_command, filters=chat_filter))
@@ -618,12 +639,12 @@ def main():
     application.add_handler(CommandHandler("remove_nick", remove_nick_command, filters=chat_filter))
     application.add_handler(CommandHandler("remove_nick_id", remove_nick_id_command, filters=chat_filter))
     
-    # Обработчик обычных сообщений - фильтруем по чату, остальное проверяем в функции
+    # Обработчик обычных сообщений
     application.add_handler(
         MessageHandler(chat_filter & filters.TEXT & ~filters.COMMAND, handle_message)
     )
     
-    # Обработчик выхода из группы (сообщения в общем чате, не в топике)
+    # Обработчик выхода из группы
     application.add_handler(
         MessageHandler(
             filters.Chat(chat_id=CHAT_ID) & filters.StatusUpdate.LEFT_CHAT_MEMBER,
@@ -639,7 +660,6 @@ def main():
     logger.info(f"👤 Админ ID: {ADMIN_IDS}")
     logger.info(f"💬 Чат ID: {CHAT_ID}")
     logger.info(f"📌 Топик ID: {TOPIC_ID}")
-    logger.info("✅ Бот будет отвечать ТОЛЬКО в указанном топике (проверка внутри функций)")
     logger.info("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
