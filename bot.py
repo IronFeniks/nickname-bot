@@ -37,7 +37,6 @@ try:
     logger.info(f"✅ Есть доступ на запись в {DATA_DIR}")
 except Exception as e:
     logger.error(f"❌ Ошибка доступа к {DATA_DIR}: {e}")
-    # В крайнем случае используем локальную папку
     DB_PATH = 'nicknames.db'
     logger.info(f"⚠️ Переключено на локальное хранилище: {DB_PATH}")
 
@@ -59,6 +58,7 @@ class NicknameDatabase:
                         last_name TEXT,
                         nickname TEXT,
                         is_active BOOLEAN DEFAULT 1,
+                        custom_title_set BOOLEAN DEFAULT 0,
                         last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -144,7 +144,8 @@ class NicknameDatabase:
             if old_nickname:
                 conn.execute("""
                     UPDATE users 
-                    SET nickname = NULL, updated_at = CURRENT_TIMESTAMP
+                    SET nickname = NULL, updated_at = CURRENT_TIMESTAMP,
+                        custom_title_set = 0
                     WHERE user_id = ?
                 """, (user_id,))
                 
@@ -171,7 +172,7 @@ class NicknameDatabase:
         """Получает пользователя по ID"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
-                "SELECT user_id, username, first_name, last_name, nickname FROM users WHERE user_id = ?",
+                "SELECT user_id, username, first_name, last_name, nickname, custom_title_set FROM users WHERE user_id = ?",
                 (user_id,)
             )
             return cursor.fetchone()
@@ -214,11 +215,15 @@ class NicknameDatabase:
             cursor = conn.execute("SELECT COUNT(*) FROM users WHERE is_active = 0")
             inactive = cursor.fetchone()[0]
             
+            cursor = conn.execute("SELECT COUNT(*) FROM users WHERE custom_title_set = 1 AND is_active = 1")
+            with_custom_titles = cursor.fetchone()[0]
+            
             return {
                 'total': total,
                 'active': active,
                 'with_nicknames': with_nicknames,
-                'inactive': inactive
+                'inactive': inactive,
+                'with_custom_titles': with_custom_titles
             }
 
 # Создаем экземпляр базы данных
@@ -228,6 +233,35 @@ db = NicknameDatabase()
 def is_admin(user_id):
     """Проверяет, является ли пользователь админом"""
     return user_id in ADMIN_IDS
+
+async def set_telegram_title(application, chat_id, user_id, title):
+    """Устанавливает кастомное отображаемое имя в Telegram"""
+    try:
+        await application.bot.set_chat_member_custom_title(
+            chat_id=chat_id,
+            user_id=user_id,
+            custom_title=title[:128]  # ограничение Telegram
+        )
+        logger.info(f"✅ Установлен тег для {user_id}: {title}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки тега для {user_id}: {e}")
+        return False
+
+async def remove_telegram_title(application, chat_id, user_id):
+    """Удаляет кастомное отображаемое имя (сбрасывает на оригинальное)"""
+    try:
+        # Telegram не позволяет напрямую удалить тег, нужно установить пустую строку
+        await application.bot.set_chat_member_custom_title(
+            chat_id=chat_id,
+            user_id=user_id,
+            custom_title=""
+        )
+        logger.info(f"✅ Удален тег для {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка удаления тега для {user_id}: {e}")
+        return False
 
 async def scan_topic_history(application, chat_id, topic_id, limit=5000):
     """Сканирует историю сообщений в топике и добавляет авторов в БД"""
@@ -239,15 +273,18 @@ async def scan_topic_history(application, chat_id, topic_id, limit=5000):
         logger.info(f"🔍 Начинаю сканирование истории топика {topic_id}")
         
         while count < limit:
-            # Получаем сообщения из топика
-            messages = await application.bot.get_chat_history(
-                chat_id=chat_id,
-                message_thread_id=topic_id,
-                limit=min(100, limit - count),
-                offset_id=offset_id
-            )
+            try:
+                messages = await application.bot.get_chat_history(
+                    chat_id=chat_id,
+                    message_thread_id=topic_id,
+                    limit=min(100, limit - count)
+                )
+            except Exception as e:
+                logger.error(f"Ошибка при получении сообщений: {e}")
+                break
             
             if not messages:
+                logger.info("Достигнут конец истории")
                 break
             
             for msg in messages:
@@ -255,7 +292,6 @@ async def scan_topic_history(application, chat_id, topic_id, limit=5000):
                 user = msg.from_user
                 
                 if user and not user.is_bot:
-                    # Обновляем пользователя в БД
                     db.update_user(
                         user_id=user.id,
                         username=user.username.lower() if user.username else None,
@@ -263,17 +299,15 @@ async def scan_topic_history(application, chat_id, topic_id, limit=5000):
                         last_name=user.last_name or ""
                     )
                     added += 1
-                    
-                    # Обновляем offset для следующей итерации
-                    offset_id = msg.message_id
             
             logger.info(f"📊 Обработано {count} сообщений, добавлено {added} пользователей")
             
-            # Если получили меньше сообщений, чем запросили — достигли конца
-            if len(messages) < min(100, limit - count):
+            if messages:
+                offset_id = messages[-1].message_id
+            
+            if len(messages) < 100:
                 break
             
-            # Небольшая задержка, чтобы не превысить лимиты API
             await asyncio.sleep(0.5)
         
         logger.info(f"✅ Сканирование завершено. Всего сообщений: {count}, пользователей: {added}")
@@ -336,7 +370,7 @@ async def show_users_list(message):
             response += f"{i}. {user_display}\n"
     
     stats = db.get_stats()
-    response += f"\n👥 <b>Всего:</b> {stats['active']} | <b>С никнеймами:</b> {stats['with_nicknames']}"
+    response += f"\n👥 <b>Всего:</b> {stats['active']} | <b>С никнеймами:</b> {stats['with_nicknames']} | <b>С тегами в Telegram:</b> {stats['with_custom_titles']}"
     
     await message.reply_text(response, parse_mode='HTML')
     logger.info(f"📊 Показан список пользователей ({len(users)} активных)")
@@ -350,7 +384,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 <b>Привет! Я бот для хранения никнеймов.</b>\n\n"
         "📋 <b>Команды:</b>\n"
         "• /list — показать список всех участников\n"
-        "• /greate_name ВашНик — задать свой никнейм\n"
+        "• /greate_name ВашНик — задать свой никнейм (меняет отображаемое имя!)\n"
         "• /edit_name НовыйНик — изменить свой никнейм\n"
         "• /remove_name — удалить свой никнейм\n"
         "• /help — показать это сообщение\n\n"
@@ -370,7 +404,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_users_list(update.message)
 
 async def greate_name_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Задать свой никнейм"""
+    """Задать свой никнейм (с установкой тега в Telegram)"""
     if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
@@ -392,15 +426,27 @@ async def greate_name_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Никнейм слишком короткий (минимум 2 символа)")
         return
     
+    # Сохраняем в базу
     db.set_nickname(user.id, nickname)
     
-    await update.message.reply_text(
-        f"✅ Никнейм сохранен! Теперь ты <b>{html.escape(nickname)}</b>",
-        parse_mode='HTML'
-    )
+    # Устанавливаем тег в Telegram
+    success = await set_telegram_title(context.application, CHAT_ID, user.id, nickname)
+    
+    if success:
+        await update.message.reply_text(
+            f"✅ Никнейм сохранен! Теперь ты <b>{html.escape(nickname)}</b>\n"
+            f"✨ Отображаемое имя в Telegram изменено!",
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Никнейм сохранен в базе! Теперь ты <b>{html.escape(nickname)}</b>\n"
+            f"⚠️ Но не удалось изменить отображаемое имя. Проверьте права бота (нужно 'Изменение тегов участников').",
+            parse_mode='HTML'
+        )
 
 async def edit_name_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Изменить свой никнейм"""
+    """Изменить свой никнейм (с обновлением тега)"""
     if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
@@ -429,22 +475,36 @@ async def edit_name_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # Обновляем в базе
     db.set_nickname(user.id, nickname)
     
-    await update.message.reply_text(
-        f"✅ Никнейм изменен! Теперь ты <b>{html.escape(nickname)}</b>",
-        parse_mode='HTML'
-    )
+    # Обновляем тег в Telegram
+    success = await set_telegram_title(context.application, CHAT_ID, user.id, nickname)
+    
+    if success:
+        await update.message.reply_text(
+            f"✅ Никнейм изменен! Теперь ты <b>{html.escape(nickname)}</b>\n"
+            f"✨ Отображаемое имя в Telegram обновлено!",
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Никнейм изменен в базе! Теперь ты <b>{html.escape(nickname)}</b>\n"
+            f"⚠️ Но не удалось обновить отображаемое имя. Проверьте права бота.",
+            parse_mode='HTML'
+        )
 
 async def remove_name_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удалить свой никнейм"""
+    """Удалить свой никнейм (с удалением тега)"""
     if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
     user = update.effective_user
     
     if db.remove_nickname(user.id):
-        await update.message.reply_text("✅ Твой никнейм удален.")
+        # Удаляем тег в Telegram
+        await remove_telegram_title(context.application, CHAT_ID, user.id)
+        await update.message.reply_text("✅ Твой никнейм удален. Отображаемое имя сброшено.")
     else:
         await update.message.reply_text("❌ У тебя нет никнейма.")
 
@@ -459,12 +519,42 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(
         "🔐 <b>Админ-команды:</b>\n\n"
         "• /scan_history — просканировать историю и собрать всех участников\n"
-        "• /set_nick @username Ник — установить никнейм\n"
+        "• /set_nick @username Ник — установить никнейм (с тегом в Telegram)\n"
         "• /set_nick_id ID Ник — установить никнейм по ID\n"
         "• /remove_nick @username — удалить никнейм\n"
         "• /remove_nick_id ID — удалить никнейм по ID\n"
+        "• /sync_titles — синхронизировать теги (установить всем из базы)\n"
         "• /stats — статистика базы данных\n"
         "• /admin_help — это сообщение",
+        parse_mode='HTML'
+    )
+
+async def sync_titles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Синхронизирует теги: устанавливает всем пользователям из базы их никнеймы"""
+    if not is_admin(update.effective_user.id):
+        return
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
+        return
+    
+    msg = await update.message.reply_text("🔄 Синхронизация тегов...")
+    
+    users = db.get_active_users()
+    success_count = 0
+    fail_count = 0
+    
+    for user_id, username, first_name, last_name, nickname in users:
+        if nickname:
+            if await set_telegram_title(context.application, CHAT_ID, user_id, nickname):
+                success_count += 1
+            else:
+                fail_count += 1
+        await asyncio.sleep(0.3)  # небольшая задержка
+    
+    await msg.edit_text(
+        f"✅ <b>Синхронизация завершена!</b>\n\n"
+        f"✅ Успешно: {success_count}\n"
+        f"❌ Ошибок: {fail_count}\n"
+        f"👥 Всего пользователей с никнеймами: {len([u for u in users if u[4]])}",
         parse_mode='HTML'
     )
 
@@ -479,7 +569,6 @@ async def scan_history_command(update: Update, context: ContextTypes.DEFAULT_TYP
     
     msg = await update.message.reply_text("📜 Сканирую историю сообщений...\n\nЭто может занять некоторое время...")
     
-    # Сканируем последние 5000 сообщений
     total_msgs, added_users = await scan_topic_history(
         context.application, 
         CHAT_ID, 
@@ -513,6 +602,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 <b>Всего в базе:</b> {stats['total']}\n"
         f"✅ <b>Активных:</b> {stats['active']}\n"
         f"📝 <b>С никнеймами:</b> {stats['with_nicknames']}\n"
+        f"🏷️ <b>С тегами в Telegram:</b> {stats['with_custom_titles']}\n"
         f"👋 <b>Покинули:</b> {stats['inactive']}\n"
         f"📁 <b>Файл БД:</b> {DB_PATH}"
     )
@@ -520,7 +610,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response, parse_mode='HTML')
 
 async def set_nick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Установить никнейм пользователю по @username"""
+    """Установить никнейм пользователю по @username (с тегом)"""
     if not is_admin(update.effective_user.id):
         return
     if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
@@ -542,13 +632,17 @@ async def set_nick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user[0]
     db.set_nickname(user_id, nickname, update.effective_user.id)
     
+    # Устанавливаем тег в Telegram
+    await set_telegram_title(context.application, CHAT_ID, user_id, nickname)
+    
     await update.message.reply_text(
-        f"✅ Никнейм <b>{html.escape(nickname)}</b> установлен для @{username}",
+        f"✅ Никнейм <b>{html.escape(nickname)}</b> установлен для @{username}\n"
+        f"✨ Отображаемое имя в Telegram изменено!",
         parse_mode='HTML'
     )
 
 async def set_nick_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Установить никнейм пользователю по ID"""
+    """Установить никнейм пользователю по ID (с тегом)"""
     if not is_admin(update.effective_user.id):
         return
     if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
@@ -574,13 +668,17 @@ async def set_nick_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     db.set_nickname(user_id, nickname, update.effective_user.id)
     
+    # Устанавливаем тег в Telegram
+    await set_telegram_title(context.application, CHAT_ID, user_id, nickname)
+    
     await update.message.reply_text(
-        f"✅ Никнейм <b>{html.escape(nickname)}</b> установлен для ID: {user_id}",
+        f"✅ Никнейм <b>{html.escape(nickname)}</b> установлен для ID: {user_id}\n"
+        f"✨ Отображаемое имя в Telegram изменено!",
         parse_mode='HTML'
     )
 
 async def remove_nick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удалить никнейм пользователя по @username"""
+    """Удалить никнейм пользователя по @username (с удалением тега)"""
     if not is_admin(update.effective_user.id):
         return
     if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
@@ -600,12 +698,13 @@ async def remove_nick_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = user[0]
     
     if db.remove_nickname(user_id, update.effective_user.id):
-        await update.message.reply_text(f"✅ Никнейм удален у @{username}")
+        await remove_telegram_title(context.application, CHAT_ID, user_id)
+        await update.message.reply_text(f"✅ Никнейм удален у @{username}. Отображаемое имя сброшено.")
     else:
         await update.message.reply_text(f"❌ У @{username} нет никнейма.")
 
 async def remove_nick_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удалить никнейм пользователя по ID"""
+    """Удалить никнейм пользователя по ID (с удалением тега)"""
     if not is_admin(update.effective_user.id):
         return
     if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
@@ -622,13 +721,14 @@ async def remove_nick_id_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     if db.remove_nickname(user_id, update.effective_user.id):
-        await update.message.reply_text(f"✅ Никнейм удален у ID: {user_id}")
+        await remove_telegram_title(context.application, CHAT_ID, user_id)
+        await update.message.reply_text(f"✅ Никнейм удален у ID: {user_id}. Отображаемое имя сброшено.")
     else:
         await update.message.reply_text(f"❌ У пользователя {user_id} нет никнейма.")
 
 # ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик обычных сообщений (без напоминаний)"""
+    """Обработчик обычных сообщений"""
     if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
         return
     
@@ -636,11 +736,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = message.text
     
-    # Игнорируем команды
     if text and text.startswith('/'):
         return
     
-    # Обновляем/добавляем пользователя в базу
+    # Обновляем пользователя в базе
     db.update_user(
         user_id=user.id,
         username=user.username.lower() if user.username else None,
@@ -655,12 +754,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if nickname and 2 <= len(nickname) <= 50:
             db.set_nickname(user.id, nickname)
             
+            # Устанавливаем тег в Telegram
+            await set_telegram_title(context.application, CHAT_ID, user.id, nickname)
+            
             await message.reply_text(
-                f"✅ Привет, <b>{html.escape(nickname)}</b>!",
+                f"✅ Привет, <b>{html.escape(nickname)}</b>! Твой никнейм сохранен и отображается в чате!",
                 parse_mode='HTML'
             )
             
-            # Показываем список
             await show_users_list(message)
             return
 
@@ -695,7 +796,6 @@ def main():
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Фильтр по чату
     chat_filter = filters.Chat(chat_id=CHAT_ID)
     
     # Команды для всех
@@ -709,6 +809,7 @@ def main():
     # Админ-команды
     application.add_handler(CommandHandler("admin_help", admin_help_command, filters=chat_filter))
     application.add_handler(CommandHandler("scan_history", scan_history_command, filters=chat_filter))
+    application.add_handler(CommandHandler("sync_titles", sync_titles_command, filters=chat_filter))
     application.add_handler(CommandHandler("stats", stats_command, filters=chat_filter))
     application.add_handler(CommandHandler("set_nick", set_nick_command, filters=chat_filter))
     application.add_handler(CommandHandler("set_nick_id", set_nick_id_command, filters=chat_filter))
@@ -736,6 +837,7 @@ def main():
     logger.info(f"👤 Админ ID: {ADMIN_IDS}")
     logger.info(f"💬 Чат ID: {CHAT_ID}")
     logger.info(f"📌 Топик ID: {TOPIC_ID}")
+    logger.info("🏷️ Функция изменения отображаемых имен (тегов) АКТИВНА!")
     logger.info("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
