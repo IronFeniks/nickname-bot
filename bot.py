@@ -2,6 +2,7 @@ import logging
 import sqlite3
 import os
 import html
+import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
@@ -19,30 +20,24 @@ TOPIC_ID = 4
 CHAT_ID = -1003300908374
 ADMIN_IDS = [639212691]  # ID админа
 
-# Определяем путь для базы данных (приоритет: /data на BotHost)
-if os.path.exists('/data'):
-    DB_PATH = '/data/nicknames.db'
-    logger.info(f"✅ Используется постоянное хранилище: {DB_PATH}")
-    os.makedirs('/data', exist_ok=True)
-else:
-    DB_PATH = 'nicknames.db'
-    logger.info(f"⚠️ Используется локальное хранилище: {DB_PATH}")
+# Определяем путь для базы данных (для BotHost используем /app/data)
+DATA_DIR = '/app/data'
+DB_PATH = os.path.join(DATA_DIR, 'nicknames.db')
 
-# Проверяем, можем ли писать в выбранное место
+# Создаем директорию для БД
 try:
-    db_dir = os.path.dirname(DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-        test_file = os.path.join(db_dir, 'test_write.tmp')
-    else:
-        test_file = 'test_write.tmp'
+    os.makedirs(DATA_DIR, exist_ok=True)
+    logger.info(f"✅ Используется постоянное хранилище: {DB_PATH}")
     
+    # Проверяем доступ на запись
+    test_file = os.path.join(DATA_DIR, 'test_write.tmp')
     with open(test_file, 'w') as f:
         f.write('test')
     os.remove(test_file)
-    logger.info(f"✅ Есть доступ на запись в {db_dir or 'текущую директорию'}")
+    logger.info(f"✅ Есть доступ на запись в {DATA_DIR}")
 except Exception as e:
-    logger.error(f"❌ Нет доступа на запись: {e}")
+    logger.error(f"❌ Ошибка доступа к {DATA_DIR}: {e}")
+    # В крайнем случае используем локальную папку
     DB_PATH = 'nicknames.db'
     logger.info(f"⚠️ Переключено на локальное хранилище: {DB_PATH}")
 
@@ -234,15 +229,67 @@ def is_admin(user_id):
     """Проверяет, является ли пользователь админом"""
     return user_id in ADMIN_IDS
 
+async def scan_topic_history(application, chat_id, topic_id, limit=5000):
+    """Сканирует историю сообщений в топике и добавляет авторов в БД"""
+    try:
+        count = 0
+        added = 0
+        offset_id = 0
+        
+        logger.info(f"🔍 Начинаю сканирование истории топика {topic_id}")
+        
+        while count < limit:
+            # Получаем сообщения из топика
+            messages = await application.bot.get_chat_history(
+                chat_id=chat_id,
+                message_thread_id=topic_id,
+                limit=min(100, limit - count),
+                offset_id=offset_id
+            )
+            
+            if not messages:
+                break
+            
+            for msg in messages:
+                count += 1
+                user = msg.from_user
+                
+                if user and not user.is_bot:
+                    # Обновляем пользователя в БД
+                    db.update_user(
+                        user_id=user.id,
+                        username=user.username.lower() if user.username else None,
+                        first_name=user.first_name or "",
+                        last_name=user.last_name or ""
+                    )
+                    added += 1
+                    
+                    # Обновляем offset для следующей итерации
+                    offset_id = msg.message_id
+            
+            logger.info(f"📊 Обработано {count} сообщений, добавлено {added} пользователей")
+            
+            # Если получили меньше сообщений, чем запросили — достигли конца
+            if len(messages) < min(100, limit - count):
+                break
+            
+            # Небольшая задержка, чтобы не превысить лимиты API
+            await asyncio.sleep(0.5)
+        
+        logger.info(f"✅ Сканирование завершено. Всего сообщений: {count}, пользователей: {added}")
+        return count, added
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка сканирования: {e}")
+        return 0, 0
+
 async def show_users_list(message):
-    """Показывает список всех активных пользователей в формате:
-    Имя (@username) — *никнейм*
-    """
+    """Показывает список всех активных пользователей"""
     users = db.get_active_users()
     
     if not users:
         await message.reply_text(
-            "📭 Список пользователей пуст.",
+            "📭 Список пользователей пуст. Используйте /scan_history для сбора участников из истории.",
             parse_mode='HTML'
         )
         return
@@ -251,9 +298,6 @@ async def show_users_list(message):
     
     for i, (user_id, username, first_name, last_name, nickname) in enumerate(users, 1):
         # Формируем отображаемое имя
-        display_parts = []
-        
-        # Добавляем имя из профиля (first_name + last_name)
         if first_name and last_name:
             profile_name = f"{first_name} {last_name}"
         elif first_name:
@@ -263,7 +307,6 @@ async def show_users_list(message):
         else:
             profile_name = None
         
-        # Добавляем @username если есть
         if username:
             username_display = f"@{html.escape(username)}"
         else:
@@ -293,7 +336,7 @@ async def show_users_list(message):
             response += f"{i}. {user_display}\n"
     
     stats = db.get_stats()
-    response += f"\n👥 <b>Всего:</b> {stats['active']}"
+    response += f"\n👥 <b>Всего:</b> {stats['active']} | <b>С никнеймами:</b> {stats['with_nicknames']}"
     
     await message.reply_text(response, parse_mode='HTML')
     logger.info(f"📊 Показан список пользователей ({len(users)} активных)")
@@ -415,12 +458,44 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await update.message.reply_text(
         "🔐 <b>Админ-команды:</b>\n\n"
+        "• /scan_history — просканировать историю и собрать всех участников\n"
         "• /set_nick @username Ник — установить никнейм\n"
         "• /set_nick_id ID Ник — установить никнейм по ID\n"
         "• /remove_nick @username — удалить никнейм\n"
         "• /remove_nick_id ID — удалить никнейм по ID\n"
-        "• /stats — статистика\n"
+        "• /stats — статистика базы данных\n"
         "• /admin_help — это сообщение",
+        parse_mode='HTML'
+    )
+
+async def scan_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сканирует историю топика и собирает всех авторов"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Только для администратора")
+        return
+    
+    if update.effective_chat.id != CHAT_ID or update.effective_message.message_thread_id != TOPIC_ID:
+        return
+    
+    msg = await update.message.reply_text("📜 Сканирую историю сообщений...\n\nЭто может занять некоторое время...")
+    
+    # Сканируем последние 5000 сообщений
+    total_msgs, added_users = await scan_topic_history(
+        context.application, 
+        CHAT_ID, 
+        TOPIC_ID, 
+        limit=5000
+    )
+    
+    stats = db.get_stats()
+    await msg.edit_text(
+        f"✅ <b>Сканирование завершено!</b>\n\n"
+        f"📨 <b>Просмотрено сообщений:</b> {total_msgs}\n"
+        f"👥 <b>Добавлено пользователей:</b> {added_users}\n"
+        f"📊 <b>Всего в базе:</b> {stats['total']}\n"
+        f"✅ <b>Активных:</b> {stats['active']}\n"
+        f"📝 <b>С никнеймами:</b> {stats['with_nicknames']}\n\n"
+        f"🔍 <i>Сканированы последние сообщения в топике</i>",
         parse_mode='HTML'
     )
 
@@ -461,7 +536,7 @@ async def set_nick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = db.get_user_by_username(username)
     
     if not user:
-        await update.message.reply_text(f"❌ Пользователь @{username} не найден.")
+        await update.message.reply_text(f"❌ Пользователь @{username} не найден в базе. Сначала используйте /scan_history")
         return
     
     user_id = user[0]
@@ -494,7 +569,7 @@ async def set_nick_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = db.get_user_by_id(user_id)
     
     if not user:
-        await update.message.reply_text(f"❌ Пользователь с ID {user_id} не найден.")
+        await update.message.reply_text(f"❌ Пользователь с ID {user_id} не найден. Сначала используйте /scan_history")
         return
     
     db.set_nickname(user_id, nickname, update.effective_user.id)
@@ -616,7 +691,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
 def main():
-    """Запуск бота с правильной фильтрацией по топику"""
+    """Запуск бота"""
     
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -633,6 +708,7 @@ def main():
     
     # Админ-команды
     application.add_handler(CommandHandler("admin_help", admin_help_command, filters=chat_filter))
+    application.add_handler(CommandHandler("scan_history", scan_history_command, filters=chat_filter))
     application.add_handler(CommandHandler("stats", stats_command, filters=chat_filter))
     application.add_handler(CommandHandler("set_nick", set_nick_command, filters=chat_filter))
     application.add_handler(CommandHandler("set_nick_id", set_nick_id_command, filters=chat_filter))
